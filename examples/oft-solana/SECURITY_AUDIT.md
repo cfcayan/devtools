@@ -302,3 +302,49 @@ Scope: `examples/oft-solana` only (local code review; no external target interac
 - Add negative tests for malformed cross-chain payloads, extreme values, and accounting divergence.
 - Introduce operational safety rails for admin tasks (`--dry-run`, explicit chain confirmation, role checks in script layer).
 - Keep dependency versions pinned and periodically run SCA tooling in CI.
+
+---
+
+## Bounty-Style Submission (Primary Finding: H-1)
+
+## Brief/Intro
+
+A malformed LayerZero payload can cause the Solana OFT program to panic during account validation in `lz_receive`, because message bytes are sliced without prior length checks. This creates a denial-of-service condition for affected inbound messages until the payload handling is corrected.
+
+## Vulnerability Details
+
+- **Category:** Input Validation / Availability
+- **Severity:** High
+- **Affected code paths:**
+  - `programs/oft/src/msg_codec.rs` (`send_to`, `amount_sd`) perform fixed slicing on untrusted `message` bytes.
+  - `programs/oft/src/instructions/lz_receive.rs` uses `msg_codec::send_to(&params.message)` inside account constraints.
+- **Root cause:**
+  - The parser assumes `message.len() >= 40` and directly indexes byte ranges.
+  - If a shorter message is provided, Rust slice bounds checks fail and abort execution.
+- **Trust boundary:**
+  - `params.message` comes from cross-chain payload data and must be treated as untrusted until validated.
+
+## Impact Details
+
+- Inbound message handling can fail hard before protocol-level cleanup logic runs.
+- Repeated malformed deliveries can cause sustained operational disruption for receive flows (message processing DoS).
+- The issue affects availability and reliability of cross-chain token delivery for configured peers.
+
+## References
+
+- `examples/oft-solana/programs/oft/src/msg_codec.rs`
+- `examples/oft-solana/programs/oft/src/instructions/lz_receive.rs`
+- `examples/oft-solana/SECURITY_AUDIT.md` (H-1 section)
+
+## Proof of Concept
+
+> Safe local-only demonstration (no external targets):
+
+1. In a local Anchor test, invoke `oft::lz_receive` with otherwise valid accounts.
+2. Set `params.message` to a short payload (for example, fewer than 40 bytes).
+3. Observe transaction failure caused by out-of-bounds slice behavior before normal message processing completes.
+
+**Recommended patch direction (safe):**
+
+- Add explicit `message` length validation before decoding (or provide checked decode helpers returning `Result`).
+- Return a domain error (e.g., `InvalidMessage`) instead of panicking.
